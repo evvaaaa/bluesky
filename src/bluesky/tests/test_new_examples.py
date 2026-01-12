@@ -3,6 +3,7 @@ import threading
 import time as ttime
 from collections import defaultdict
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 from event_model.documents.event_descriptor import DataKey
@@ -975,41 +976,43 @@ def test_custom_stream_name(RE, hw):
         RE(count([hw.det], 3, per_shot=one_shot))
 
 
+class MultiConfiguredDevice(Named, Readable, Movable[int]):
+    """Device to test that read_configuration cache is updated for a new stream. This is done by
+    "configuring" the device and the read_configuration should show a new value."""
+
+    def __init__(self, motor, name):
+        self.motor = motor
+        self.read_value = 10
+        super().__init__(name)
+
+    def set(self, config_value: int) -> Status:
+        return self.motor.set(config_value)
+
+    def read(self) -> dict[str, Reading]:
+        return read_pv(self, self.read_value)
+
+    def read_configuration(self) -> dict[str, Reading]:
+        return read_pv(self, self.motor.position)
+
+    def describe(self) -> dict[str, DataKey]:
+        return describe_pv(self)
+
+    def describe_configuration(self) -> dict[str, DataKey]:
+        return describe_pv(self)
+
+
+def multi_stream_plan(device: MultiConfiguredDevice, value_configuration: list[int], iterations: int):
+    """Plan that configures a device by setting a value and then reading the device. This is done X number
+    of times. Each time, it saves it to a new stream so we get new device configuration each time."""
+    yield from open_run()
+    for v in value_configuration:
+        yield from abs_set(device, v, wait=True)
+        for _ in range(iterations):
+            yield from trigger_and_read([device], name=f"test{v}")
+    yield from close_run()
+
+
 def test_device_has_new_read_configuration_once_per_stream(RE, hw):
-    class MultiConfiguredDevice(Named, Readable, Movable[int]):
-        """Device to test that read_configuration cache is updated for a new stream. This is done by
-        "configuring" the device and the read_configuration should show a new value."""
-
-        def __init__(self, motor, name):
-            self.motor = motor
-            self.read_value = 10
-            super().__init__(name)
-
-        def set(self, config_value: int) -> Status:
-            return self.motor.set(config_value)
-
-        def read(self) -> dict[str, Reading]:
-            return read_pv(self, self.read_value)
-
-        def read_configuration(self) -> dict[str, Reading]:
-            return read_pv(self, self.motor.position)
-
-        def describe(self) -> dict[str, DataKey]:
-            return describe_pv(self)
-
-        def describe_configuration(self) -> dict[str, DataKey]:
-            return describe_pv(self)
-
-    def multi_stream_plan(device: MultiConfiguredDevice, value_configuration: list[int], iterations: int):
-        """Plan that configures a device by setting a value and then reading the device. This is done X number
-        of times. Each time, it saves it to a new stream so we get new device configuration each time."""
-        yield from open_run()
-        for v in value_configuration:
-            yield from abs_set(device, v, wait=True)
-            for _ in range(iterations):
-                yield from trigger_and_read([device], name=f"test{v}")
-        yield from close_run()
-
     docs = DocHolder()
     device = MultiConfiguredDevice(hw.motor, "device")
     pv = f"{device.name}-pv"
@@ -1024,3 +1027,17 @@ def test_device_has_new_read_configuration_once_per_stream(RE, hw):
         assert docs["descriptor"][v]["configuration"][device.name]["data"] == {pv: v}
         for i in range(1, iterations + 1):
             assert docs["event"][i + v]["data"][pv] == device.read_value
+
+
+def test_device_has_new_read_configuration_once_per_stream_and_cached_once(RE, hw):
+    docs = DocHolder()
+    device = MultiConfiguredDevice(hw.motor, "device")
+    config_values = [0, 1, 2, 3]
+    iterations = 2
+
+    mock_read_configuration = Mock(wraps=device.read_configuration)
+    device.read_configuration = mock_read_configuration
+
+    RE(multi_stream_plan(device, config_values, iterations), docs.append)
+
+    assert mock_read_configuration.call_count == 4

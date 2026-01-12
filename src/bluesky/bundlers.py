@@ -346,8 +346,6 @@ class RunBundler:
             )
         self._current_stream_cache = RunBundler._StreamCache()
         self._saved_stream_cache.clear()
-        # self._curr _read_cache.clear()
-        # self._asset_docs_cache.clear()
         self._objs_read.clear()
         self.bundling = True
         command, obj, args, kwargs, _ = msg
