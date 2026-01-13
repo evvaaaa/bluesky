@@ -72,37 +72,86 @@ def _describe_collect_dict_is_valid(
     )
 
 
+@dataclass
+class _StreamCache:
+    """Helper data class that holds all cached data related to devices for a partiuclar stream."""
+
+    # Readable
+    # cache of obj.read() in one Event
+    read_cache: deque[dict[str, Reading]] = field(default_factory=deque)
+    # cache of all obj.describe() output
+    describe_cache: ObjDict[DataKey] = field(default_factory=dict)
+
+    # Collectable
+    # cache of all obj.describe_collect() output for Collectable object only
+    describe_collect_cache: dict[Any, dict[str, DataKey] | dict[str, dict[str, DataKey]]] = field(
+        default_factory=dict
+    )
+
+    # Configurable
+    # obj.describe_configuration()
+    config_desc_cache: ObjDict[DataKey] = field(default_factory=dict)
+    # obj.read_configuration() values
+    config_values_cache: ObjDict[Any] = field(default_factory=dict)
+    # obj.read_configuration() timestamps
+    config_ts_cache: ObjDict[Any] = field(default_factory=dict)
+
+    def clear_readable_cache(self):
+        """Clear the cache of Readable methods so new data can be stored."""
+        self.read_cache.clear()
+        self.describe_cache.clear()
+        self.describe_collect_cache.clear()
+
+    async def ensure_cached(self, obj, collect=False):
+        """Cache objects Readable and Configurable methods. Cache Collectable methods if collect is True."""
+        coros = []
+        if not collect and obj not in self.describe_cache:
+            coros.append(self._cache_describe(obj))
+        elif collect and obj not in self.describe_collect_cache:
+            coros.append(self._cache_describe_collect(obj))
+
+        if obj not in self.config_desc_cache:
+            coros.append(self._cache_describe_config(obj))
+            coros.append(self.cache_read_config(obj))
+        await asyncio.gather(*coros)
+
+    async def _cache_describe(self, obj):
+        "Read the object's describe and cache it."
+        obj = check_supports(obj, Readable)
+        self.describe_cache[obj] = await maybe_await(obj.describe())
+
+    async def _cache_describe_collect(self, obj: Collectable):
+        "Read the object's describe_collect and cache it."
+        obj = check_supports(obj, Collectable)
+        c: dict[str, DataKey] | dict[str, dict[str, DataKey]] = await maybe_await(obj.describe_collect())
+        self.describe_collect_cache[obj] = c
+
+    async def _cache_describe_config(self, obj):
+        "Read the object's describe_configuration and cache it."
+
+        if isinstance(obj, Configurable):
+            conf_keys = await maybe_await(obj.describe_configuration())
+        else:
+            conf_keys = {}
+
+        self.config_desc_cache[obj] = conf_keys
+
+    async def cache_read_config(self, obj):
+        "Read the object's configuration and cache it."
+        if isinstance(obj, Configurable):
+            conf = await maybe_await(obj.read_configuration())
+        else:
+            conf = {}
+        config_values = {}
+        config_ts = {}
+        for key, val in conf.items():
+            config_values[key] = val["value"]
+            config_ts[key] = val["timestamp"]
+        self.config_values_cache[obj] = config_values
+        self.config_ts_cache[obj] = config_ts
+
+
 class RunBundler:
-    @dataclass
-    class _StreamCache:
-        """Helper data class that holds all cached data related to devices for a partiuclar stream."""
-
-        # Readable
-        # cache of obj.read() in one Event
-        read_cache: deque[dict[str, Reading]] = field(default_factory=deque)
-        # cache of all obj.describe() output
-        describe_cache: ObjDict[DataKey] = field(default_factory=dict)
-
-        # Collectable
-        # cache of all obj.describe() output for Collectable object only
-        describe_collect_cache: dict[Any, dict[str, DataKey] | dict[str, dict[str, DataKey]]] = field(
-            default_factory=dict
-        )
-
-        # Configurable
-        # obj.describe_configuration()
-        config_desc_cache: ObjDict[DataKey] = field(default_factory=dict)
-        # obj.read_configuration() values
-        config_values_cache: ObjDict[Any] = field(default_factory=dict)
-        # obj.read_configuration() timestamps
-        config_ts_cache: ObjDict[Any] = field(default_factory=dict)
-
-        def clear_readable_cache(self):
-            """Clear the cache of Readable methods so new data can be stored."""
-            self.read_cache.clear()
-            self.describe_cache.clear()
-            self.describe_collect_cache.clear()
-
     def __init__(
         self,
         md: dict | None,
@@ -121,8 +170,8 @@ class RunBundler:
         self._run_start_uid = None  # The (future) runstart uid
         self._objs_read: deque[HasName] = deque()  # objects read in one Event
 
-        self._saved_stream_cache: dict[str, RunBundler._StreamCache] = dict()  # noqa: C408
-        self._current_stream_cache: RunBundler._StreamCache = RunBundler._StreamCache()
+        self._saved_stream_cache: dict[str, _StreamCache] = dict()  # noqa: C408
+        self._current_stream_cache: _StreamCache = _StreamCache()
 
         self._asset_docs_cache: deque[Asset | StreamAsset] = deque()  # cache of obj.collect_asset_docs()
 
@@ -164,7 +213,7 @@ class RunBundler:
         self._compose_stop = run.compose_stop
         self._compose_stream_resource = run.compose_stream_resource
 
-        self._current_stream_cache = RunBundler._StreamCache()
+        self._current_stream_cache = _StreamCache()
         self._saved_stream_cache.clear()
 
         await self.emit(DocumentNames.start, doc)
@@ -282,18 +331,6 @@ class RunBundler:
             list(objs_dks),
         )
 
-    async def _ensure_cached(self, obj, collect=False):
-        coros = []
-        if not collect and obj not in self._current_stream_cache.describe_cache:
-            coros.append(self._cache_describe(obj))
-        elif collect and obj not in self._current_stream_cache.describe_collect_cache:
-            coros.append(self._cache_describe_collect(obj))
-
-        if obj not in self._current_stream_cache.config_desc_cache:
-            coros.append(self._cache_describe_config(obj))
-            coros.append(self._cache_read_config(obj))
-        await asyncio.gather(*coros)
-
     async def declare_stream(self, msg):
         """Generate and emit an EventDescriptor."""
         command, no_obj, objs, kwargs, _ = msg
@@ -305,13 +342,9 @@ class RunBundler:
         objs = frozenset(objs)
         objs_dks = {}  # {collect_object: stream_data_keys}
 
-        if stream_name in self._saved_stream_cache:
-            self._current_stream_cache = self._saved_stream_cache[stream_name]
-        else:
-            self._current_stream_cache = RunBundler._StreamCache()
-            self._saved_stream_cache[stream_name] = self._current_stream_cache
+        self._set_current_stream_cache(stream_name)
 
-        await asyncio.gather(*[self._ensure_cached(obj, collect=collect) for obj in objs])
+        await asyncio.gather(*[self._current_stream_cache.ensure_cached(obj, collect=collect) for obj in objs])
         for obj in objs:
             if collect:
                 data_keys = self._current_stream_cache.describe_collect_cache[obj]
@@ -333,6 +366,14 @@ class RunBundler:
         existing_stream_names.append(stream_name)
 
         return await self._prepare_stream(stream_name, objs_dks)
+
+    def _set_current_stream_cache(self, stream_name: str):
+        if stream_name in self._saved_stream_cache:
+            self._current_stream_cache = self._saved_stream_cache[stream_name]
+            self._current_stream_cache.clear_readable_cache()
+        else:
+            self._current_stream_cache = _StreamCache()
+            self._saved_stream_cache[stream_name] = self._current_stream_cache
 
     async def create(self, msg):
         """
@@ -374,13 +415,7 @@ class RunBundler:
             if self._bundle_name not in self._descriptors:
                 raise IllegalMessageSequence("In strict mode you must pre-declare streams.")
 
-        stream_name = self._bundle_name
-        if stream_name in self._saved_stream_cache:
-            self._current_stream_cache = self._saved_stream_cache[stream_name]
-            self._current_stream_cache.clear_readable_cache()
-        else:
-            self._current_stream_cache = RunBundler._StreamCache()
-            self._saved_stream_cache[stream_name] = self._current_stream_cache
+        self._set_current_stream_cache(self._bundle_name)
 
     async def read(self, msg, reading):
         """
@@ -398,7 +433,7 @@ class RunBundler:
             # on the same device you make obj.describe() calls multiple times.
             # As this is harmless and not an expected use case, we don't guard
             # against it. Reading multiple devices concurrently works fine.
-            await self._ensure_cached(obj)
+            await self._current_stream_cache.ensure_cached(obj)
 
             # check that current read collides with nothing else in
             # current event
@@ -427,35 +462,6 @@ class RunBundler:
 
         return reading
 
-    async def _cache_describe(self, obj):
-        "Read the object's describe and cache it."
-        obj = check_supports(obj, Readable)
-        self._current_stream_cache.describe_cache[obj] = await maybe_await(obj.describe())
-
-    async def _cache_describe_config(self, obj):
-        "Read the object's describe_configuration and cache it."
-
-        if isinstance(obj, Configurable):
-            conf_keys = await maybe_await(obj.describe_configuration())
-        else:
-            conf_keys = {}
-
-        self._current_stream_cache.config_desc_cache[obj] = conf_keys
-
-    async def _cache_read_config(self, obj):
-        "Read the object's configuration and cache it."
-        if isinstance(obj, Configurable):
-            conf = await maybe_await(obj.read_configuration())
-        else:
-            conf = {}
-        config_values = {}
-        config_ts = {}
-        for key, val in conf.items():
-            config_values[key] = val["value"]
-            config_ts[key] = val["timestamp"]
-        self._current_stream_cache.config_values_cache[obj] = config_values
-        self._current_stream_cache.config_ts_cache[obj] = config_ts
-
     async def monitor(self, msg):
         """
         Monitor a signal. Emit event documents asynchronously.
@@ -480,7 +486,7 @@ class RunBundler:
         if obj in self._monitor_params:
             raise IllegalMessageSequence(f"A 'monitor' message was sent for {obj} which is already monitored")
 
-        await self._ensure_cached(obj)
+        await self._current_stream_cache.ensure_cached(obj)
 
         stream_bundle = await self._prepare_stream(name, {obj: self._current_stream_cache.describe_cache[obj]})
         compose_event = stream_bundle[1]
@@ -607,7 +613,7 @@ class RunBundler:
         if descriptor_doc is None or d_objs is None:
             # use the dequeue not the set to preserve order
             for obj in self._objs_read:
-                await self._ensure_cached(obj, collect=isinstance(obj, Collectable))
+                await self._current_stream_cache.ensure_cached(obj, collect=isinstance(obj, Collectable))
                 objs_dks[obj] = self._current_stream_cache.describe_cache[obj]
 
             descriptor_doc, compose_event, d_objs = await self._prepare_stream(desc_key, objs_dks)
@@ -761,12 +767,6 @@ class RunBundler:
             # Empty dict, could be either but we don't care
             return []
 
-    async def _cache_describe_collect(self, obj: Collectable):
-        "Read the object's describe and cache it."
-        obj = check_supports(obj, Collectable)
-        c: dict[str, DataKey] | dict[str, dict[str, DataKey]] = await maybe_await(obj.describe_collect())
-        self._current_stream_cache.describe_collect_cache[obj] = c
-
     async def _describe_collect(self, collect_object: Flyable):
         """Read an object's describe_collect and cache it.
 
@@ -790,7 +790,7 @@ class RunBundler:
             }
 
         """
-        await self._ensure_cached(collect_object, collect=True)
+        await self._current_stream_cache.ensure_cached(collect_object, collect=True)
 
         describe_collect = self._current_stream_cache.describe_collect_cache[collect_object]
         describe_collect_items = self._format_datakeys_with_stream_name(describe_collect)
@@ -1217,7 +1217,7 @@ class RunBundler:
             object.configure(*args, **kwargs)
         """
         obj = msg.obj
-        await self._cache_read_config(obj)
+        await self._current_stream_cache.cache_read_config(obj)
         # Invalidate any event descriptors that include this object.
         # New event descriptors, with this new configuration, will
         # be created for any future event documents.
