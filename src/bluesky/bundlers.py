@@ -83,7 +83,7 @@ class _StreamCache:
     describe_cache: ObjDict[DataKey] = field(default_factory=dict)
 
     # Collectable
-    # cache of all obj.describe_collect() output for Collectable object only
+    # cache of all obj.describe_collect() output
     describe_collect_cache: dict[Any, dict[str, DataKey] | dict[str, dict[str, DataKey]]] = field(
         default_factory=dict
     )
@@ -122,7 +122,6 @@ class _StreamCache:
 
     async def _cache_describe_config(self, obj):
         "Read the object's describe_configuration and cache it."
-
         if isinstance(obj, Configurable):
             conf_keys = await maybe_await(obj.describe_configuration())
         else:
