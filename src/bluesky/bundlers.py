@@ -1119,7 +1119,6 @@ class RunBundler:
                         "the objects first and provide the stream name"
                     )
                 else:
-                    print(f"stream_name: {stream_name}")
                     await self._describe_collect(collect_objects[0])
 
         # Get the indicies from the collect objects
