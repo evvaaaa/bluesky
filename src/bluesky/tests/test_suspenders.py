@@ -103,8 +103,6 @@ def test_suspender_wrapper(RE, hw):
     scan = [Msg("checkpoint"), Msg("sleep", None, sleep_time)]
     sig.put(0)
 
-
-
     susp = SuspendBoolHigh(sig, sleep=wait_time)
 
     RE(suspend_wrapper(scan, susp))
