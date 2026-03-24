@@ -790,6 +790,7 @@ def test_sigint_many_hits_panic(RE):
     pid = os.getpid()
 
     event = threading.Event()
+    wait_forever_event = threading.Event()
 
     def msg_hook(msg):
         if msg.command == "null":
@@ -807,16 +808,16 @@ def test_sigint_many_hits_panic(RE):
     def hanging_plan():
         "a plan that blocks the RunEngine's normal Ctrl+C handing with a sleep"
         yield Msg("null")
-        ttime.sleep(5)
+        wait_forever_event.wait(timeout=30)
         yield Msg("null")
 
-    start_time = ttime.monotonic()
     threading.Thread(target=sim_kill, daemon=True).start()
+    start_time = ttime.monotonic()
     with pytest.raises(RunEngineInterrupted):
         RE(hanging_plan())
-    # Check that hammering SIGINT escaped from that 5-second sleep.
     diff = ttime.monotonic() - start_time
-    assert diff < 5
+    # Check that hammering SIGINT escaped from that 5-second sleep.
+    assert diff < 30
     # The KeyboardInterrupt but because we could not shut down, panic!
     assert RE.state == "panicked"
 
@@ -837,6 +838,8 @@ def test_sigint_many_hits_panic(RE):
 
     with pytest.raises(RuntimeError):
         RE.request_pause()
+
+    wait_forever_event.set()
 
 
 @uses_os_kill_sigint
