@@ -837,7 +837,7 @@ def test_sigint_many_hits_cb(RE):
     def sim_kill(n):
         for j in range(n):  # noqa: B007
             print("KILL")
-            ttime.sleep(0.05)
+            ttime.sleep(0.11)
             os.kill(pid, signal.SIGINT)
 
     @run_decorator()
