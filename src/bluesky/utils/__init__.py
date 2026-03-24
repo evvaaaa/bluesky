@@ -229,7 +229,8 @@ class SignalHandler:
 
     def __init__(self, sig, log=None):
         warnings.warn(
-            f"{SignalHandler.__name__} is deprecated and will be removed in a future version of Bluesky. Please use {SignalHandlerBase.__name__} instead.",
+            f"{SignalHandler.__name__} is deprecated and will be removed in a future version of Bluesky. "
+            f"See {SigintHandler.__name__} for an example on how to build a custom one.",
             DeprecationWarning,
             stacklevel=2,
         )
