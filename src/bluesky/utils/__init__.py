@@ -14,6 +14,7 @@ import traceback
 import types
 import uuid
 import warnings
+from enum import Enum
 from collections import namedtuple
 from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, Generator, Iterable, Sequence
 from collections.abc import Iterable as TypingIterable
@@ -227,6 +228,11 @@ class SignalHandler:
     """
 
     def __init__(self, sig, log=None):
+        warnings.warn(
+            f"{SignalHandler.__name__} is deprecated and will be removed in a future version of Bluesky. Please use {SignalHandlerBase.__name__} instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self.sig = sig
         self.interrupted = False
         self.count = 0
@@ -267,57 +273,82 @@ class SignalHandler:
     def handle_signals(self): ...
 
 
-class SigintHandler(SignalHandler):
+class PauseRequest(Enum):
+    NONE = 0
+    SOFT = 1
+    HARD = 2
+
+
+class SigintHandler:
     def __init__(self, RE):
-        super().__init__(signal.SIGINT, log=RE.log)
         self.RE = RE
-        self.last_sigint_time = None  # time most recent SIGINT was processed
+        self.log = RE.log
+        self.last_sigint_time = time.monotonic()
+        self.request = PauseRequest.NONE
+        self.released = True
 
-    def __enter__(self):
-        return super().__enter__()
-
-    def handle_signals(self):
-        # Check for pause requests from keyboard.
-        # TODO, there is a possible race condition between the two
-        # pauses here
-        if self.RE.state.is_running and (not self.RE._interrupted):
-            if self.last_sigint_time is None or time.time() - self.last_sigint_time > 10:
-                # reset the counter to 1
-                # It's been 10 seconds since the last SIGINT. Reset.
-                self.count = 1
-                if self.last_sigint_time is not None:
-                    self.log.debug("It has been 10 seconds since the last SIGINT. Resetting SIGINT handler.")
-
-                # weeee push these to threads to not block the main thread
-                def maybe_defer_pause():
-                    try:
-                        self.RE.request_pause(True)
-                    except TransitionError:
-                        ...
-
-                threading.Thread(target=maybe_defer_pause).start()
+    def _watch_request(self) -> None:
+        while not self.released:
+            if self.request == PauseRequest.SOFT:
                 print(
                     "A 'deferred pause' has been requested. The "
                     "RunEngine will pause at the next checkpoint. "
                     "To pause immediately, hit Ctrl+C again in the "
                     "next 10 seconds."
                 )
-
-                self.last_sigint_time = time.time()
-            elif self.count == 2:
+                try:
+                    self.RE.request_pause(defer=True)
+                except TransitionError:
+                    ...
+                self.request = PauseRequest.NONE
+            elif self.request == PauseRequest.HARD:
                 print("trying a second time")
-                # - Ctrl-C twice within 10 seconds -> hard pause
-                self.log.debug("RunEngine detected two SIGINTs. A hard pause will be requested.")
+                try:
+                    self.RE.request_pause(defer=False)
+                except TransitionError:
+                    ...
+                self.request_kind = PauseRequest.NONE
+            time.sleep(0.1)
 
-                # weeee push these to threads to not block the main thread
-                def maybe_prompt_pause():
-                    try:
-                        self.RE.request_pause(False)
-                    except TransitionError:
-                        ...
+    def __enter__(self):
+        self.count = 0
+        self.last_sigint_time = time.monotonic()
+        self.released = False
+        self.request = PauseRequest.NONE
+        self.original_handler = signal.getsignal(signal.SIGINT)
+        self.request_thread = threading.Thread(target=self._watch_request, daemon=True)
+        self.request_thread.start()
 
-                threading.Thread(target=maybe_prompt_pause).start()
-            self.last_sigint_time = time.time()
+        def handler(signum, frame):
+            # Assumptions:
+            # - `self.last_sigint_time` is initialized on __enter__ with timestamp
+            # - `self.count` is initialized on __enter__ with 0
+            if self.RE.state.is_running and (not self.RE._interrupted):
+                now = time.monotonic()
+                time_diff = now - self.last_sigint_time
+
+                if time_diff > 10 or self.count == 0:
+                    # First pause request
+                    self.last_sigint_time = now
+                    self.count = 1
+                    self.request = PauseRequest.SOFT
+                elif time_diff > 0.1 and self.count > 0:
+                    # Second or more pause requests
+                    self.last_sigint_time = now
+                    self.count += 1
+                    if self.count < 11:
+                        self.request = PauseRequest.HARD
+                    else:
+                        self.released = True
+                        signal.signal(signal.SIGINT, self.original_handler)
+
+        signal.signal(signal.SIGINT, handler)
+        return self
+
+    def __exit__(self, type, value, tb) -> None:
+        if not self.released:
+            self.released = True
+            signal.signal(signal.SIGINT, self.original_handler)
 
 
 class CallbackRegistry:
