@@ -977,22 +977,37 @@ def test_single_sigint_no_carry_over(RE):
     """A single SIGINT does not pause at the next plan's checkpoint"""
     pid = os.getpid()
 
-    event = threading.Event()
+    running_event = threading.Event()
+    deferred_pause_done = threading.Event()
 
     def msg_hook(msg):
         if msg.command == "null":
-            event.set()
+            running_event.set()
 
     RE.msg_hook = msg_hook
 
+    _orig_request_pause = RE.request_pause
+
+    def _tracked_request_pause(defer=False):
+        result = _orig_request_pause(defer=defer)
+        if defer:
+            deferred_pause_done.set()
+        return result
+
+    RE.request_pause = _tracked_request_pause
+
     def send_sigint():
         # Wait for event
-        event.wait()
+        running_event.wait()
         os.kill(pid, signal.SIGINT)
 
     def test_plan():
+        first = False
         for _ in range(5):
             yield Msg("null")
+            if first:
+                deferred_pause_done.wait(timeout=5)
+                first = False
 
     # Single SIGINT defers a pause but plan finishes anyway
     sigint_thread = threading.Thread(target=send_sigint, daemon=True)
