@@ -225,6 +225,12 @@ class SignalHandler:
       probably only see one of them when you unblock this signal.
 
     https://www.gnu.org/software/libc/manual/html_node/Checking-for-Pending-Signals.html
+
+    .. deprecated:
+
+        This class is deprecated and will be removed in a future version of Bluesky.
+        See :ref:`SigintHandler` for an example on how to build a custom one.
+
     """
 
     def __init__(self, sig, log=None):
@@ -281,17 +287,35 @@ class PauseRequest(Enum):
 
 
 class SigintHandler:
+    """
+    Context manager that replaces a `KeyboardInterrupt` with a mechanism to
+    pause the Bluesky RunEngine. This allows you to press `Ctrl + C` during
+    a running plan and have the RunEngine pause.
+
+    On the first SIGINT, it will request a 'deferred pause' or 'soft pause'. The RunEngine will
+    pause at the next checkpoint.
+
+    On each subsequent SIGINT within 10 seconds, it will request a 'hard pause'. The RunEngine
+    will pause immediately.
+
+    However, if more than 10 SIGINTs are processed within 10 seconds, it will restore
+    and execute the original signal handler (typically `KeyboardInterrupt`).
+
+    Each SIGINT must be spaced by at least 100ms to count (to represent intentional human input).
+
+    The count will reset after 10 seconds since the last SIGINT processed.
+    """
+
     def __init__(self, RE):
-        self.RE = RE
-        self.log = RE.log
-        self.last_sigint_time = time.monotonic()
-        self.request = PauseRequest.NONE
-        self.released = True
-        self.request_event = threading.Event()
+        self._RE = RE
+        self._last_sigint_time = time.monotonic()
+        self._request = PauseRequest.NONE
+        self._released = True
+        self._request_event = threading.Event()
 
     def _watch_request(self) -> None:
-        while not self.released:
-            if self.request == PauseRequest.SOFT:
+        while not self._released:
+            if self._request == PauseRequest.SOFT:
                 print(
                     "A 'deferred pause' has been requested. The "
                     "RunEngine will pause at the next checkpoint. "
@@ -299,68 +323,76 @@ class SigintHandler:
                     "next 10 seconds."
                 )
                 try:
-                    self.RE.request_pause(defer=True)
+                    self._RE.request_pause(defer=True)
                 except TransitionError:
                     print(
                         "Deferred pause request failed. RunEngine is not in a pausable state. "
                         "Inspect `RE.state` and try again after 10 seconds..."
                     )
-            elif self.request == PauseRequest.HARD:
+            elif self._request == PauseRequest.HARD:
                 print("A 'hard pause' has been requested.")
                 try:
-                    self.RE.request_pause(defer=False)
+                    self._RE.request_pause(defer=False)
                 except TransitionError:
                     print(
                         "Hard pause request failed. RunEngine is not in a pausable state. "
-                        "Inspect `RE.state` and try again after 10 seconds..."
+                        "Inspect `RE.state` and try again..."
                     )
 
-            # Clear previous request and block until next request
-            self.request_event.wait()
-            self.request_event.clear()
+            # Block until next request
+            self._request_event.wait()
+            self._request_event.clear()
 
     def __enter__(self):
-        self.count = 0
-        self.last_sigint_time = time.monotonic()
-        self.released = False
-        self.request = PauseRequest.NONE
-        self.original_handler = signal.getsignal(signal.SIGINT)
-        self.request_thread = threading.Thread(target=self._watch_request, daemon=True)
-        self.request_thread.start()
+        # Setup internal state tracking
+        self._count = 0
+        self._last_sigint_time = time.monotonic()
+        self._released = False
+        self._request = PauseRequest.NONE
+        self._original_handler = signal.getsignal(signal.SIGINT)
+
+        # Spawn request thread
+        self._request_thread = threading.Thread(target=self._watch_request, daemon=True)
+        self._request_thread.start()
 
         def handler(signum, frame):
-            # Assumptions:
-            # - `self.last_sigint_time` is initialized on __enter__ with timestamp
-            # - `self.count` is initialized on __enter__ with 0
+            """
+            Assumptions:
+            - `self._last_sigint_time` is initialized on __enter__ with timestamp
+            - `self._count` is initialized on __enter__ with 0
+            This callback must run very fast and cannot use any blocking I/O
+            (no threads, prints, locks, etc.)
+            """
             now = time.monotonic()
-            time_diff = now - self.last_sigint_time
+            time_diff = now - self._last_sigint_time
 
-            if time_diff > 10 or self.count == 0:
+            if time_diff > 10 or self._count == 0:
                 # First pause request
-                self.last_sigint_time = now
-                self.count = 1
-                self.request = PauseRequest.SOFT
-                self.request_event.set()
-            elif time_diff > 0.1 and self.count > 0:
+                self._last_sigint_time = now
+                self._count = 1
+                self._request = PauseRequest.SOFT
+                self._request_event.set()
+            elif time_diff > 0.1 and self._count > 0:
                 # Second or more pause requests
-                self.last_sigint_time = now
-                self.count += 1
-                if self.count < 11:
-                    self.request = PauseRequest.HARD
+                self._last_sigint_time = now
+                self._count += 1
+                if self._count < 11:
+                    self._request = PauseRequest.HARD
                 else:
-                    self.released = True
-                    signal.signal(signal.SIGINT, self.original_handler)
-                    self.original_handler(signum, frame)
-                self.request_event.set()
+                    self._released = True
+                    signal.signal(signal.SIGINT, self._original_handler)
+                    self._original_handler(signum, frame)
+                self._request_event.set()
 
+        # Install handler callback
         signal.signal(signal.SIGINT, handler)
         return self
 
     def __exit__(self, type, value, tb) -> None:
-        if not self.released:
-            self.released = True
-            signal.signal(signal.SIGINT, self.original_handler)
-            self.request_event.set()
+        if not self._released:
+            self._released = True
+            signal.signal(signal.SIGINT, self._original_handler)
+            self._request_event.set()
 
 
 class CallbackRegistry:
