@@ -287,6 +287,7 @@ class SigintHandler:
         self.last_sigint_time = time.monotonic()
         self.request = PauseRequest.NONE
         self.released = True
+        self.request_event = threading.Event()
 
     def _watch_request(self) -> None:
         while not self.released:
@@ -309,7 +310,10 @@ class SigintHandler:
                 except TransitionError:
                     ...
                 self.request_kind = PauseRequest.NONE
-            time.sleep(0.1)
+
+            # Clear previous request and block until next request
+            self.request_event.clear()
+            self.request_event.wait()
 
     def __enter__(self):
         self.count = 0
@@ -333,6 +337,7 @@ class SigintHandler:
                     self.last_sigint_time = now
                     self.count = 1
                     self.request = PauseRequest.SOFT
+                    self.request_event.set()
                 elif time_diff > 0.1 and self.count > 0:
                     # Second or more pause requests
                     self.last_sigint_time = now
@@ -342,6 +347,7 @@ class SigintHandler:
                     else:
                         self.released = True
                         signal.signal(signal.SIGINT, self.original_handler)
+                    self.request_event.set()
 
         signal.signal(signal.SIGINT, handler)
         return self
@@ -350,6 +356,7 @@ class SigintHandler:
         if not self.released:
             self.released = True
             signal.signal(signal.SIGINT, self.original_handler)
+            self.request_event.set()
 
 
 class CallbackRegistry:

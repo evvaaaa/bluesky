@@ -732,7 +732,7 @@ def test_sigint_three_hits(RE, hw):
 
     def sim_kill(n):
         for j in range(n):  # noqa: B007
-            time.sleep(0.05)
+            time.sleep(0.12)
             os.kill(pid, signal.SIGINT)
 
     lp = RE.loop
@@ -747,12 +747,12 @@ def test_sigint_three_hits(RE, hw):
         RE(finalize_wrapper(self_sig_int_plan(), abs_set(motor, 0, wait=True)))
     end_time = ttime.time()
     # not enough time for motor to cleanup, but long enough to start
-    assert 0.05 < end_time - start_time < 0.2
+    assert 0.05 < end_time - start_time < 0.4
     RE.abort()  # now cleanup
 
     done_cleanup_time = ttime.time()
     # this should be 0.5 (the motor.delay) above, leave sloppy for CI
-    assert 0.3 < done_cleanup_time - end_time < 0.6
+    assert 0.4 < done_cleanup_time - end_time < 0.6
 
 
 @uses_os_kill_sigint
