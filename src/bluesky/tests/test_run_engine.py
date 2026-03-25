@@ -807,7 +807,7 @@ def test_sigint_many_hits_panic(RE, deterministic_sigint):
     def hanging_plan():
         "a plan that blocks the RunEngine's normal Ctrl+C handing with a wait"
         yield Msg("null")
-        wait_forever_event.wait(timeout=15)
+        wait_forever_event.wait()
         yield Msg("null")
 
     with deterministic_sigint() as sigint:
