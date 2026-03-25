@@ -7,7 +7,6 @@ import types
 from collections import defaultdict
 from functools import partial
 from traceback import FrameSummary, extract_tb
-from unittest.mock import patch
 
 import pytest
 from event_model import DocumentNames
@@ -49,7 +48,6 @@ from bluesky.run_engine import (
 from bluesky.suspenders import SuspendBoolHigh
 from bluesky.tests import requires_ophyd, uses_os_kill_sigint
 from bluesky.tests.utils import DocCollector, MsgCollector
-from bluesky.utils import SigintHandler
 
 from .utils import _careful_event_set, _fabricate_asycio_event
 
@@ -725,30 +723,39 @@ def test_exit_raise(RE, unpause_func, excp):
 
 
 @uses_os_kill_sigint
-def test_sigint_three_hits(RE, hw):
-    import time
-
+def test_sigint_three_hits(RE, hw, deterministic_sigint):
     motor = hw.motor
     motor.delay = 0.5
 
-    pid = os.getpid()
+    event = threading.Event()
 
-    def sim_kill(n):
-        for j in range(n):  # noqa: B007
-            time.sleep(0.12)
-            os.kill(pid, signal.SIGINT)
+    def msg_hook(msg):
+        if msg.command == "set":
+            event.set()
+
+    RE.msg_hook = msg_hook
 
     lp = RE.loop
     motor.loop = lp
 
     def self_sig_int_plan():
-        threading.Timer(0.05, sim_kill, (3,)).start()
         yield from abs_set(motor, 1, wait=True)
 
-    start_time = ttime.time()
-    with pytest.raises(RunEngineInterrupted):
-        RE(finalize_wrapper(self_sig_int_plan(), abs_set(motor, 0, wait=True)))
-    end_time = ttime.time()
+    with deterministic_sigint() as sigint:
+
+        def sim_kill():
+            event.wait(timeout=5)
+            # Let the motor begin its simulated move before interrupting.
+            ttime.sleep(0.05)
+            for _ in range(3):
+                sigint.send()
+
+        threading.Thread(target=sim_kill, daemon=True).start()
+        start_time = ttime.time()
+        with pytest.raises(RunEngineInterrupted):
+            RE(finalize_wrapper(self_sig_int_plan(), abs_set(motor, 0, wait=True)))
+        end_time = ttime.time()
+
     # not enough time for motor to cleanup, but long enough to start
     assert 0.05 < end_time - start_time < 0.4
     RE.abort()  # now cleanup
@@ -759,41 +766,39 @@ def test_sigint_three_hits(RE, hw):
 
 
 @uses_os_kill_sigint
-def test_sigint_many_hits_pln(RE):
-    pid = os.getpid()
-
-    def sim_kill(n):
-        for j in range(n):
-            print("KILL", j)
-            ttime.sleep(0.11)
-            os.kill(pid, signal.SIGINT)
+def test_sigint_many_hits_pln(RE, deterministic_sigint):
+    plan_started = threading.Event()
 
     def hanging_plan():
         "a plan that blocks the RunEngine's normal Ctrl+C handing with a sleep"
+        plan_started.set()
         for j in range(100):  # noqa: B007
             ttime.sleep(0.1)
         yield Msg("null")
 
-    start_time = ttime.time()
-    timer = threading.Timer(0.2, sim_kill, (11,))
-    timer.start()
-    with pytest.raises(RunEngineInterrupted):
-        RE(hanging_plan())
+    with deterministic_sigint() as sigint:
+
+        def sim_kill():
+            plan_started.wait(timeout=5)
+            for _ in range(11):
+                sigint.send()
+
+        threading.Thread(target=sim_kill, daemon=True).start()
+        start_time = ttime.time()
+        with pytest.raises(RunEngineInterrupted):
+            RE(hanging_plan())
+
     # Check that hammering SIGINT escaped from that 10-second sleep.
     assert ttime.time() - start_time < 5
     # The KeyboardInterrupt will have been converted to a hard pause that
     # the test plan can not handle so we abort and go to idle.
     assert RE.state == "idle"
-    timer.join()
 
 
 @uses_os_kill_sigint
-def test_sigint_many_hits_panic(RE):
-    pid = os.getpid()
-
+def test_sigint_many_hits_panic(RE, deterministic_sigint):
     event = threading.Event()
     wait_forever_event = threading.Event()
-    handler_done = threading.Event()  # signals that the handler finished processing
 
     def msg_hook(msg):
         if msg.command == "null":
@@ -801,50 +806,25 @@ def test_sigint_many_hits_panic(RE):
 
     RE.msg_hook = msg_hook
 
-    # Fake clock guaranteeing every signal clears the 100ms debounce in SigintHandler.
-    _fake_time = 0.0
-
-    def _monotonic():
-        return _fake_time
-
-    def sim_kill():
-        nonlocal _fake_time
-        event.wait(timeout=5)
-        for _ in range(11):
-            handler_done.clear()
-            _fake_time += 0.2
-            os.kill(pid, signal.SIGINT)
-            handler_done.wait(timeout=5)
-
-    _orig_enter = SigintHandler.__enter__
-
-    def _patched_enter(self_handler):
-        with patch("bluesky.utils.time.monotonic", _monotonic):
-            result = _orig_enter(self_handler)
-        # Wrap the installed handler to use the fake clock and synchronize.
-        installed = signal.getsignal(signal.SIGINT)
-
-        def synced_handler(signum, frame):
-            with patch("bluesky.utils.time.monotonic", _monotonic):
-                installed(signum, frame)
-            handler_done.set()
-
-        signal.signal(signal.SIGINT, synced_handler)
-        return result
-
     def hanging_plan():
         "a plan that blocks the RunEngine's normal Ctrl+C handing with a sleep"
         yield Msg("null")
         wait_forever_event.wait(timeout=30)
         yield Msg("null")
 
-    real_monotonic = ttime.monotonic
-    with patch.object(SigintHandler, "__enter__", _patched_enter):
+    with deterministic_sigint() as sigint:
+
+        def sim_kill():
+            event.wait(timeout=5)
+            for _ in range(11):
+                sigint.send()
+
         threading.Thread(target=sim_kill, daemon=True).start()
-        start_time = real_monotonic()
+        start_time = ttime.monotonic()
         with pytest.raises(RunEngineInterrupted):
             RE(hanging_plan())
-        diff = real_monotonic() - start_time
+        diff = ttime.monotonic() - start_time
+
     # Check that hammering SIGINT escaped from that 5-second sleep.
     assert diff < 30
     # The KeyboardInterrupt but because we could not shut down, panic!
@@ -872,14 +852,8 @@ def test_sigint_many_hits_panic(RE):
 
 
 @uses_os_kill_sigint
-def test_sigint_many_hits_cb(RE):
-    pid = os.getpid()
-
-    def sim_kill(n):
-        for j in range(n):  # noqa: B007
-            print("KILL")
-            ttime.sleep(0.11)
-            os.kill(pid, signal.SIGINT)
+def test_sigint_many_hits_cb(RE, deterministic_sigint):
+    cb_started = threading.Event()
 
     @run_decorator()
     def infinite_plan():
@@ -887,19 +861,26 @@ def test_sigint_many_hits_cb(RE):
             yield Msg("null")
 
     def hanging_callback(name, doc):
+        cb_started.set()
         for j in range(100):  # noqa: B007
             ttime.sleep(0.1)
 
-    start_time = ttime.time()
-    timer = threading.Timer(0.2, sim_kill, (11,))
-    timer.start()
-    with pytest.raises(RunEngineInterrupted):
-        RE(infinite_plan(), {"start": hanging_callback})
+    with deterministic_sigint() as sigint:
+
+        def sim_kill():
+            cb_started.wait(timeout=5)
+            for _ in range(11):
+                sigint.send()
+
+        threading.Thread(target=sim_kill, daemon=True).start()
+        start_time = ttime.time()
+        with pytest.raises(RunEngineInterrupted):
+            RE(infinite_plan(), {"start": hanging_callback})
+
     # Check that hammering SIGINT escaped from that 10-second sleep.
     assert ttime.time() - start_time < 5
     # The KeyboardInterrupt will have been converted to a hard pause.
     assert RE.state == "idle"
-    timer.join()
 
 
 @uses_os_kill_sigint
