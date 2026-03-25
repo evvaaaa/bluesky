@@ -107,9 +107,11 @@ class DeterministicSigint:
         installed = signal.getsignal(signal.SIGINT)
 
         def synced_handler(signum, frame):
-            with patch("bluesky.utils.time.monotonic", self._monotonic):
-                installed(signum, frame)
-            self._handler_done.set()
+            try:
+                with patch("bluesky.utils.time.monotonic", self._monotonic):
+                    installed(signum, frame)
+            finally:
+                self._handler_done.set()
 
         signal.signal(signal.SIGINT, synced_handler)
         return result
@@ -119,7 +121,7 @@ class DeterministicSigint:
         self._handler_done.clear()
         self._fake_time += 0.2
         os.kill(self._pid, signal.SIGINT)
-        self._handler_done.wait(timeout=5)
+        self._handler_done.wait()
 
     def __enter__(self):
         self._patcher.start()
