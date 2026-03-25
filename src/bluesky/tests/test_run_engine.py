@@ -1,6 +1,7 @@
 import asyncio
 import os
 import signal
+import sys
 import threading
 import time as ttime
 import types
@@ -793,6 +794,14 @@ def test_sigint_many_hits_pln(RE, deterministic_sigint):
     assert RE.state == "idle"
 
 
+@pytest.mark.skipif(
+    sys.version_info < (3, 12),
+    reason=(
+        "Hangs on Python <3.12 due to a CPython bug: after "
+        "PyThreadState_SetAsyncExc the main thread deadlocks and "
+        "never reaches the subsequent blocking_event.wait(). "
+    ),
+)
 @uses_os_kill_sigint
 def test_sigint_many_hits_panic(RE, deterministic_sigint):
     event = threading.Event()
