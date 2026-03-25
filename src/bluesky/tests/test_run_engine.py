@@ -7,6 +7,7 @@ import types
 from collections import defaultdict
 from functools import partial
 from traceback import FrameSummary, extract_tb
+from unittest.mock import patch
 
 import pytest
 from event_model import DocumentNames
@@ -48,6 +49,7 @@ from bluesky.run_engine import (
 from bluesky.suspenders import SuspendBoolHigh
 from bluesky.tests import requires_ophyd, uses_os_kill_sigint
 from bluesky.tests.utils import DocCollector, MsgCollector
+from bluesky.utils import SigintHandler
 
 from .utils import _careful_event_set, _fabricate_asycio_event
 
@@ -791,6 +793,7 @@ def test_sigint_many_hits_panic(RE):
 
     event = threading.Event()
     wait_forever_event = threading.Event()
+    handler_done = threading.Event()  # signals that the handler finished processing
 
     def msg_hook(msg):
         if msg.command == "null":
@@ -798,12 +801,36 @@ def test_sigint_many_hits_panic(RE):
 
     RE.msg_hook = msg_hook
 
+    # Fake clock guaranteeing every signal clears the 100ms debounce in SigintHandler.
+    _fake_time = 0.0
+
+    def _monotonic():
+        return _fake_time
+
     def sim_kill():
+        nonlocal _fake_time
         event.wait(timeout=5)
-        for j in range(11):
-            print("KILL", j, ttime.monotonic() - start_time)
-            ttime.sleep(0.15)
+        for _ in range(11):
+            handler_done.clear()
+            _fake_time += 0.2
             os.kill(pid, signal.SIGINT)
+            handler_done.wait(timeout=5)
+
+    _orig_enter = SigintHandler.__enter__
+
+    def _patched_enter(self_handler):
+        with patch("bluesky.utils.time.monotonic", _monotonic):
+            result = _orig_enter(self_handler)
+        # Wrap the installed handler to use the fake clock and synchronize.
+        installed = signal.getsignal(signal.SIGINT)
+
+        def synced_handler(signum, frame):
+            with patch("bluesky.utils.time.monotonic", _monotonic):
+                installed(signum, frame)
+            handler_done.set()
+
+        signal.signal(signal.SIGINT, synced_handler)
+        return result
 
     def hanging_plan():
         "a plan that blocks the RunEngine's normal Ctrl+C handing with a sleep"
@@ -811,11 +838,13 @@ def test_sigint_many_hits_panic(RE):
         wait_forever_event.wait(timeout=30)
         yield Msg("null")
 
-    threading.Thread(target=sim_kill, daemon=True).start()
-    start_time = ttime.monotonic()
-    with pytest.raises(RunEngineInterrupted):
-        RE(hanging_plan())
-    diff = ttime.monotonic() - start_time
+    real_monotonic = ttime.monotonic
+    with patch.object(SigintHandler, "__enter__", _patched_enter):
+        threading.Thread(target=sim_kill, daemon=True).start()
+        start_time = real_monotonic()
+        with pytest.raises(RunEngineInterrupted):
+            RE(hanging_plan())
+        diff = real_monotonic() - start_time
     # Check that hammering SIGINT escaped from that 5-second sleep.
     assert diff < 30
     # The KeyboardInterrupt but because we could not shut down, panic!
