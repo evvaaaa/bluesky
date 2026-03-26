@@ -797,9 +797,10 @@ def test_sigint_many_hits_pln(RE, deterministic_sigint):
 @pytest.mark.skipif(
     sys.version_info < (3, 12),
     reason=(
-        "Hangs on Python <3.12 due to a CPython bug: after "
+        "Hangs on Python <3.12 due to a possible CPython bug: after "
         "PyThreadState_SetAsyncExc the main thread deadlocks and "
         "never reaches the subsequent blocking_event.wait(). "
+        "Issue only reproduces on CI."
     ),
 )
 @uses_os_kill_sigint
