@@ -325,19 +325,13 @@ class SigintHandler:
                 try:
                     self._RE.request_pause(defer=True)
                 except TransitionError:
-                    print(
-                        "Deferred pause request failed. RunEngine is not in a pausable state. "
-                        "Inspect `RE.state` and try again after 10 seconds..."
-                    )
+                    ...
             elif self._request == PauseRequest.HARD:
                 print("A 'hard pause' has been requested.")
                 try:
                     self._RE.request_pause(defer=False)
                 except TransitionError:
-                    print(
-                        "Hard pause request failed. RunEngine is not in a pausable state. "
-                        "Inspect `RE.state` and try again..."
-                    )
+                    ...
 
             # Block until next request
             self._request_event.wait()
@@ -381,10 +375,11 @@ class SigintHandler:
                 self._count += 1
                 if self._count < 11:
                     self._request = PauseRequest.HARD
+                    self._request_event.set()
                 else:
                     self._released = True
+                    self._request_event.set()
                     self._original_handler(signum, frame)
-                self._request_event.set()
 
         # Install handler callback
         signal.signal(signal.SIGINT, handler)
