@@ -27,6 +27,21 @@ Changed
 - Dropped support and testing for Python 3.9 (EOL in 2025-10)
 - ``SIGINT`` pause/interrupt behavior now requires 100ms between signal arrival to count toward a hard-pause or a ``KeyboardInterrupt``
 
+v1.14.6 (2025-10-08)
+====================
+
+Added
+-----
+
+Fixed
+-----
+
+- Error when using ``bps.wait`` with a timeout that actually triggered
+
+Changed
+-------
+
+- Remove the ``'streams'`` namespace (container) from the container structure created by ``TiledWriter``
 
 v1.14.5 (2025-10-03)
 ====================
