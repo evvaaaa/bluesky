@@ -12,7 +12,6 @@ Added
 - ``event_model`` versions to ``RE.md``
 - More flexible addresses for ZMQ callbacks
 - Improved numpy sanitization for ``Msg`` tracing
-- 
 
 Fixed
 -----
