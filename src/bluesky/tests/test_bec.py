@@ -334,6 +334,7 @@ def test_many_motors(RE, hw):
     assert not bec._live_scatters
     assert bec._table is not None
 
+
 def test_empty_motors(RE, hw):
     def simple_count(
         readables,
@@ -345,4 +346,4 @@ def test_empty_motors(RE, hw):
     bec = BestEffortCallback()
     RE.subscribe(bec)
     # should not raise
-    RE(simple_count([hw.det], md={'motors': []}))
+    RE(simple_count([hw.det], md={"motors": []}))
