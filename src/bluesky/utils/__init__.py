@@ -2125,3 +2125,8 @@ def truncate_json_overflow(data):
     elif isinstance(data, float) and (data < -1.7976e308 or data > 1.7976e308):
         return min(max(data, -1.7976e308), 1.7976e308)  # (Approx.) truncate floats to fit in JSON to avoid inf
     return data
+
+
+class ObjTuple(tuple):
+    """Used so that we can check internally if sequences of objects are passed into a message, vs a single device
+    which is also a sequence."""
